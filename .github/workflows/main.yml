@@ -1,0 +1,61 @@
+name: Build and Deploy
+
+on:
+  workflow_dispatch:
+    inputs:
+      environment:
+        type: choice
+        description: Select the environment
+        required: true
+        options:
+          - test
+          - staging
+# on:
+#   push:
+#     branches:
+#       - test/devops-k8s-from-develop
+
+jobs:
+  build_and_deploy:
+    environment: ${{ github.event.inputs.environment }}
+    runs-on: self-hosted
+    env:
+      ENVIRONMENT: ${{ github.event.inputs.environment }}
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v2
+
+      - name: Set short git commit SHA
+        id: vars
+        run: |
+          calculatedSha=$(git rev-parse --short ${{ github.sha }})
+          echo "COMMIT_SHORT_SHA=$calculatedSha" >> $GITHUB_ENV
+
+      - name: Login to Amazon ECR
+        run: |
+          aws ecr get-login-password --region eu-west-1 | docker login --username AWS --password-stdin 186929679348.dkr.ecr.eu-west-1.amazonaws.com
+
+      - name: Build Docker Image
+        run: |
+          docker build -t 186929679348.dkr.ecr.eu-west-1.amazonaws.com/rsportz_${{ env.ENVIRONMENT }}:${{ env.COMMIT_SHORT_SHA }} -f ./docker/devops/Dockerfile .
+
+      - name: Push Docker Image to ECR
+        run: |
+          docker push 186929679348.dkr.ecr.eu-west-1.amazonaws.com/rsportz_${{ env.ENVIRONMENT }}:${{ env.COMMIT_SHORT_SHA }}
+
+      - name: Deploy to ArgoCD
+        env: 
+          ARGOCD_SERVER:  ${{ secrets.ARGOCD_SERVER }}
+          ARGOCD_USERNAME: ${{ secrets.ARGOCD_USERNAME }}
+          ARGOCD_PASSWORD: ${{ secrets.ARGOCD_PASSWORD }}
+        run: |
+          argocd login $ARGOCD_SERVER --username $ARGOCD_USERNAME --password $ARGOCD_PASSWORD --grpc-web
+          argocd app set rsportz-${{ env.ENVIRONMENT }} --env ${{ env.ENVIRONMENT }} --parameter tag=${{ env.COMMIT_SHORT_SHA }} --grpc-web --server $ARGOCD_SERVER
+          argocd app sync rsportz-${{ env.ENVIRONMENT }} --grpc-web --server $ARGOCD_SERVER
+          while ! argocd app wait rsportz-${{ env.ENVIRONMENT }} --sync --timeout 300; do sleep 10; done
+          echo "ArgoCD sync is complete."
+
+      - name: Get ArgoCD app status
+        run: |
+          argocd app get rsportz-${{ env.ENVIRONMENT }}
